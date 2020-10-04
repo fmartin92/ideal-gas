@@ -4,19 +4,25 @@ import functools
 import matplotlib.pyplot as plt
 from matplotlib import animation
 import pygame
+from pygame import gfxdraw
 
 HALF_EDGE_LENGTH = 1
+CANVAS_SIZE = 400
 PARTICLE_RADIUS = 2 * HALF_EDGE_LENGTH / 100
+PARTICLE_RADIUS_IN_PIXELS = int(CANVAS_SIZE / 100)
 FRAMES_PER_SECOND = 60
 TIME_EPSILON = 1 / FRAMES_PER_SECOND
-NUMBER_OF_PARTICLES = 60
-SECONDS = 5
-FRAMES = SECONDS * FRAMES_PER_SECOND
 DIMENSION = 2
-CANVAS_SIZE = 500
-PARTICLE_RADIUS_IN_PIXELS = int(CANVAS_SIZE / 100)
+
+
 RED = (255, 0, 0)
 BLUE = (0, 0, 255)
+WHITE = (255, 255, 255)
+GRAY = (200, 200, 200)
+
+
+def convert_coords(coords):
+    return [int(CANVAS_SIZE*(coord+1)/2) for coord in coords]
 
 
 def inner_product(x, y):
@@ -32,17 +38,17 @@ def distance(x, y):
 
 
 class Particle:
-    def __init__(self, pos, vel, out_of_bounds_fn, bounce_fn):
+    def __init__(self, pos, vel, receptacle):
         self.pos = pos
         self.vel = vel
-        self.out_of_bounds_fn = out_of_bounds_fn
-        self.bounce_fn = bounce_fn
+        self.receptacle = receptacle
 
     def is_out_of_bounds(self):
-        return self.out_of_bounds_fn(self)
+        return not self.receptacle.contains(self)
 
     def bounce_off_border(self):
-        return self.bounce_fn(self)
+        (new_pos, new_vel) = self.receptacle.bounce(self)
+        return Particle(new_pos, new_vel, self.receptacle)
 
     def __repr__(self):
         def stringify(vector):
@@ -51,7 +57,7 @@ class Particle:
 
     def next_step(self):
         naive_update = Particle(
-            [self.pos[i] + TIME_EPSILON * self.vel[i] for i in range(DIMENSION)], self.vel, self.out_of_bounds_fn, self.bounce_fn)
+            [self.pos[i] + TIME_EPSILON * self.vel[i] for i in range(DIMENSION)], self.vel, self.receptacle)
 
         if naive_update.is_out_of_bounds():
             return self.bounce_off_border()
@@ -76,15 +82,16 @@ class Collision:
                     for i in range(DIMENSION)]
         q = inner_product(vel_diff, pos_diff) / norm(pos_diff)**2
         new_particle1 = Particle(
-            self.particle1.pos, [self.particle1.vel[i] - q * pos_diff[i] for i in range(DIMENSION)], self.particle1.out_of_bounds_fn, self.particle1.bounce_fn)
+            self.particle1.pos, [self.particle1.vel[i] - q * pos_diff[i] for i in range(DIMENSION)], self.particle1.receptacle)
         new_particle2 = Particle(
-            self.particle2.pos, [self.particle2.vel[i] + q * pos_diff[i] for i in range(DIMENSION)], self.particle1.out_of_bounds_fn, self.particle1.bounce_fn)
+            self.particle2.pos, [self.particle2.vel[i] + q * pos_diff[i] for i in range(DIMENSION)], self.particle2.receptacle)
         return (new_particle1, new_particle2)
 
 
 class Particle_Ensemble:
-    def __init__(self, particles, prev_collisions=[]):
+    def __init__(self, particles, receptacle, prev_collisions=[]):
         self.particles = particles
+        self.receptacle = receptacle
         self.prev_collisions = prev_collisions
 
     def calculate_collisions(self):
@@ -105,108 +112,112 @@ class Particle_Ensemble:
                  ) = collision.resolve_collision()
         for i in range(len(new_particles)):
             new_particles[i] = new_particles[i].next_step()
-        return Particle_Ensemble(new_particles, collisions)
+        return Particle_Ensemble(new_particles, self.receptacle, collisions)
 
 
-def random_rectangle_ensemble():
-    def bounce_off_border(particle):
-        bounce_sign = [1 if abs(particle.pos[i] + TIME_EPSILON * particle.vel[i])
-                       < HALF_EDGE_LENGTH else -1 for i in range(DIMENSION)]
-        vel = [bounce_sign[i] * particle.vel[i] for i in range(DIMENSION)]
-        pos = [particle.pos[i] + TIME_EPSILON * vel[i]
-               for i in range(DIMENSION)]
-        return Particle(pos, vel, particle.out_of_bounds_fn, particle.bounce_fn)
+class Bounding_Receptacle:
+    def __init__(self, contains, bounce, draw_method):
+        self.contains = contains
+        self.bounce = bounce
+        self.draw_method = draw_method
 
-    def is_out_of_bounds(particle):
-        return functools.reduce(lambda x, y: x or y, [abs(particle.pos[i]) > HALF_EDGE_LENGTH for i in range(DIMENSION)])
-
-    def random_particle():
-        pos = list(np.random.uniform(-HALF_EDGE_LENGTH,
-                                     HALF_EDGE_LENGTH, DIMENSION))
-        vel = list(np.random.normal(size=DIMENSION))
-        return Particle(pos, vel, is_out_of_bounds, bounce_off_border)
-
-    return Particle_Ensemble([random_particle() for _ in range(NUMBER_OF_PARTICLES)])
+    def random_particle(self):
+        candidate_particle = Particle(
+            [2 * HALF_EDGE_LENGTH for _ in range(DIMENSION)], [2 * HALF_EDGE_LENGTH for _ in range(DIMENSION)], self)  # always out of bounds
+        while candidate_particle.is_out_of_bounds():
+            pos = list(np.random.uniform(-HALF_EDGE_LENGTH,
+                                         HALF_EDGE_LENGTH, DIMENSION))
+            vel = list(np.random.normal(size=DIMENSION))
+            candidate_particle = Particle(pos, vel, self)
+        return candidate_particle
 
 
-def convert_coords(coords):
-    return [int(CANVAS_SIZE*(coord+1)/2) for coord in coords]
+class System:
+    def __init__(self, ensemble):
+        self.ensemble = ensemble
+
+    def animate(self):
+        screen = pygame.display.set_mode((CANVAS_SIZE, CANVAS_SIZE))
+        should_run = True
+        while should_run:
+            screen.fill(WHITE)
+            self.ensemble.receptacle.draw_method(screen)
+            self.ensemble = self.ensemble.next_step()
+            (x, y) = convert_coords(self.ensemble.particles[0].pos)
+            gfxdraw.filled_circle(screen,
+                                  x, y, PARTICLE_RADIUS_IN_PIXELS, RED)
+            for p in self.ensemble.particles[1:]:
+                (x, y) = convert_coords(p.pos)
+                gfxdraw.filled_circle(
+                    screen, x, y, PARTICLE_RADIUS_IN_PIXELS, BLUE)
+            pygame.display.update()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    should_run = False
+        pygame.quit()
+
+    def draw_collisions(self):
+        screen = pygame.display.set_mode((CANVAS_SIZE, CANVAS_SIZE))
+        should_run = True
+        screen.fill(WHITE)
+        self.ensemble.receptacle.draw_method(screen)
+        while should_run:
+            collisions = self.ensemble.calculate_collisions()
+            self.ensemble = self.ensemble.next_step()
+            for p in collisions:
+                current_pos = convert_coords(p.particle1.pos)
+                pygame.draw.circle(screen, BLUE,
+                                   current_pos, PARTICLE_RADIUS_IN_PIXELS)
+            pygame.display.update()
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    should_run = False
+        pygame.quit()
 
 
-def pygame_animate(particle_ensemble):
-    screen = pygame.display.set_mode((CANVAS_SIZE, CANVAS_SIZE))
-    background = pygame.image.load('background.png').convert()
-    screen.blit(background, (0, 0))
-    should_run = True
-    while should_run:
-        screen.blit(background, (0, 0))
-        particle_ensemble = particle_ensemble.next_step()
-        red_ball_pos = convert_coords(particle_ensemble.particles[0].pos)
-        pygame.draw.circle(screen, RED,
-                           red_ball_pos, PARTICLE_RADIUS_IN_PIXELS)
-        for p in particle_ensemble.particles[1:]:
-            current_pos = convert_coords(p.pos)
-            pygame.draw.circle(screen, BLUE,
-                               current_pos, PARTICLE_RADIUS_IN_PIXELS)
-        pygame.display.update()
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                should_run = False
-    pygame.quit()
+def random_ensemble(number_of_particles, receptacle):
+    particles = [receptacle.random_particle()
+                 for _ in range(number_of_particles)]
+    return Particle_Ensemble(particles, receptacle)
 
 
-# we may want to get rid of this altogether v
-def evolve_system(particles):
-    history = [particles]
-    for _ in range(FRAMES):
-        history.append(next_step(history[-1]))
-    return history
+def rectangle_contains(particle):
+    return functools.reduce(lambda x, y: x and y, [abs(particle.pos[i]) < HALF_EDGE_LENGTH for i in range(DIMENSION)])
 
 
-def generate_animation(particles):
-    '''this needs DIMENSION = 2 in order to work'''
-    fig = plt.figure()
-    ax = plt.axes(xlim=(-HALF_EDGE_LENGTH, HALF_EDGE_LENGTH),
-                  ylim=(-HALF_EDGE_LENGTH, HALF_EDGE_LENGTH))
-    points, = ax.plot([], [], 'bo', ms=6)
-    red_dot, = ax.plot([], [], 'or', ms=6)
-
-    history = evolve_system(particles)
-
-    def init():
-        return points, red_dot
-
-    def animate(i):
-        x = [p.pos[0] for p in history[i][1:]]
-        y = [p.pos[1] for p in history[i][1:]]
-        points.set_data(x, y)
-        red_dot.set_data(history[i][0].pos[0], history[i][0].pos[1])
-        return points, red_dot
-
-    anim = animation.FuncAnimation(fig, animate, init_func=init,
-                                   frames=FRAMES, interval=1000/FRAMES_PER_SECOND, blit=True)
-    anim.save('particle.gif', writer='PillowWriter')
+def rectangle_bounce(particle):
+    bounce_sign = [1 if abs(particle.pos[i] + TIME_EPSILON * particle.vel[i])
+                   < HALF_EDGE_LENGTH else -1 for i in range(DIMENSION)]
+    vel = [bounce_sign[i] * particle.vel[i] for i in range(DIMENSION)]
+    pos = [particle.pos[i] + TIME_EPSILON * vel[i]
+           for i in range(DIMENSION)]
+    return (pos, vel)
 
 
-def pygame_animate_collisions(particles):
-    screen = pygame.display.set_mode((CANVAS_SIZE, CANVAS_SIZE))
-    blue_ball = pygame.image.load('blue_ball.png').convert()
-    background = pygame.image.load('background.png').convert()
-    screen.blit(background, (0, 0))
-    should_run = True
-    while should_run:
-        [particles, collisions] = collide(particles)
-        particles = [particle.next_step() for particle in particles]
-        for p in collisions:
-            current_pos = convert_coords(p)
-            current_pos = blue_ball.get_rect(center=current_pos)
-            screen.blit(blue_ball, (current_pos.left, current_pos.top))
-        pygame.display.update()
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                should_run = False
-    pygame.quit()
+def rectangle_draw(screen):
+    pass
 
 
-ens = random_rectangle_ensemble()
-pygame_animate(ens)
+def circle_contains(particle):
+    return norm(particle.pos) < 1
+
+
+def circle_bounce(particle):
+    tangent = [-particle.pos[1], particle.pos[0]]
+    aux = [2*inner_product(particle.vel, tangent) * coord for coord in tangent]
+    vel = [-particle.vel[i] + aux[i] for i in range(DIMENSION)]
+    pos = [particle.pos[i] + TIME_EPSILON * vel[i] for i in range(DIMENSION)]
+    return (pos, vel)
+
+
+def circle_draw(screen):
+    center = int(CANVAS_SIZE/2)
+    gfxdraw.filled_circle(screen, center, center, center, GRAY)
+
+
+if __name__ == '__main__':
+    rectangle = Bounding_Receptacle(
+        rectangle_contains, rectangle_bounce, rectangle_draw)
+    circle = Bounding_Receptacle(circle_contains, circle_bounce, circle_draw)
+    system = System(random_ensemble(50, circle))
+    system.animate()
